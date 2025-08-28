@@ -1,98 +1,206 @@
-# import os
-# import json
-# import logging
-# import numpy as np
-# from flask import Flask, request, jsonify
-# from sklearn.feature_extraction.text import TfidfVectorizer
-# from sklearn.metrics.pairwise import cosine_similarity
-# from groq import Groq
-# from dotenv import load_dotenv
+import streamlit as st
+import pandas as pd
+import google.generativeai as genai
+import os
+from dotenv import load_dotenv
+from deep_translator import GoogleTranslator
+
+load_dotenv()
+# -----------------------------
+# App Config
+# -----------------------------
+st.set_page_config(page_title="FAQ Chatbot Prototype", layout="wide")
+
+# Load API key (set in environment variable before running)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+
+model = genai.GenerativeModel("gemini-2.5-flash")
 
 
-# load_dotenv()
-# GROQ_KEY=os.getenv('GROQ_API_KEY')
-# if not GROQ_KEY:
-#     raise ValueError("GROQ_API_KEY is not found in env variables")
-# groq_client=Groq(api_key=GROQ_KEY)
 
-# SIMILARITY_THRESHOLD = 0.3
-# MAX_SNIPPET_CHARS = 2000
+# Utility functions
+def detect_language(text):
+    # Detect Hindi by script
+    if any('\u0900' <= ch <= '\u097F' for ch in text):
+        return "hi"
+    return "en"
 
-# app = Flask(__name__)
-
-# logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# # Load FAQ data
-# faq_data = []
-# with open("faq_clean.jsonl", "r", encoding="utf-8") as f:
-#     for line in f:
-#         faq_data.append(json.loads(line))
-
-# faq_questions = [q["question"] for q in faq_data]
-
-# # Build TF-IDF retriever
-# vectorizer = TfidfVectorizer()
-# faq_matrix = vectorizer.fit_transform(faq_questions)
-
-# def retrieve_context(user_query, threshold=SIMILARITY_THRESHOLD):
-#     query_vec = vectorizer.transform([user_query])
-#     similarities = cosine_similarity(query_vec, faq_matrix).flatten()
-
-#     # Get all indices where similarity >= threshold
-#     valid_indices = np.where(similarities >= threshold)[0]
-
-#     # Sort by similarity (descending)
-#     valid_indices = sorted(valid_indices, key=lambda i: similarities[i], reverse=True)
-
-#     if not valid_indices:
-#         return None  # No relevant FAQs found
-
-#     snippets = []
-#     for idx in valid_indices:
-#         ans = faq_data[idx]["answer"]
-#         if len(ans) > MAX_SNIPPET_CHARS:
-#             ans = ans[:MAX_SNIPPET_CHARS] + "..."
-#         snippets.append(
-#             f"(score={similarities[idx]:.2f})\nQ: {faq_data[idx]['question']}\nA: {ans}"
-#         )
-
-#     return "\n\n".join(snippets)
-
-# def ask_llm(user_query):
-#     context = retrieve_context(user_query)
-
-#     if not context:
-#         return "I couldn’t find any relevant information in the FAQ."
-
-#     prompt = f"""
-# You are a helpful assistant answering user questions based only on the provided FAQ context.
-
-# FAQ Context:
-# {context}
-
-# User Question:
-# {user_query}
-
-# Answer clearly and concisely, using only the FAQ context.
-# If no relevant answer exists, say "I don’t know based on the available FAQ."
-# """
-#     response = groq_client.chat.completions.create(
-#         model="llama-3.1-8b-instant",
-#         messages=[{"role": "user", "content": prompt}],
-#         temperature=0.2,
-#     )
-#     return response.choices[0].message["content"]
+def translate_text(text, target_lang="en"):
+    try:
+        return GoogleTranslator(source="auto", target=target_lang).translate(text)
+    except Exception as e:
+        print(f"Translation error: {e}")
+        return text
 
 
-# @app.route("/ask", methods=["POST"])
-# def ask():
-#     user_query = request.json.get("query", "")
-#     if not user_query.strip():
-#         return jsonify({"error": "Query cannot be empty"}), 400
+# Session State Initialization
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
 
-#     logging.info(f"User query: {user_query}")
-#     answer = ask_llm(user_query)
-#     return jsonify({"answer": answer})
+if "ratings" not in st.session_state:
+    st.session_state.ratings = {}  # store {index: rating}
 
-# if __name__ == "__main__":
-#     app.run(port=8000, debug=True)
+if "token_usage" not in st.session_state:
+    st.session_state.token_usage = 0
+
+if "show_faq" not in st.session_state:
+    st.session_state.show_faq = False
+
+# -----------------------------
+# Sidebar Controls
+# -----------------------------
+st.header("📘 FAQ Chatbot Prototype")
+st.sidebar.header("⚙️ Controls")
+faq_context = ""
+
+with st.sidebar:
+    # System prompt
+    system_prompt = st.text_area(
+        "System Prompt",
+        value="""
+You are Priya, a helpful AI assistant working at Narayan Seva Sansthan (NSS). You answer questions based on provided FAQ context, uploaded documents, and chat history. 
+Rules:
+- Introduce yourself as Priya from NSS when greeting new users
+- FAQ data is in English
+- Always process queries in English (translate if needed)
+- Respond back in the same language as the user query
+- Provide accurate answers based on the given context
+- Reference uploaded documents when relevant
+- Maintain conversation continuity
+- Be concise but comprehensive
+- Maintain continuity, use a friendly and professional tone""",
+        height=200
+    )
+
+# Token Usage Meter
+st.sidebar.subheader("📊 Token Usage Meter")
+st.sidebar.write(f"**Total Tokens Used:** {st.session_state.token_usage}")
+
+# Reset session
+if st.sidebar.button("🔄 Reset Session"):
+    st.session_state.chat_history = []
+    st.session_state.token_usage = 0
+    st.session_state.ratings = []
+    st.success("Session reset!")
+
+
+# File Upload
+# -----------------------------
+
+faq_file = st.file_uploader("Upload FAQ Excel", type=["xlsx"])
+
+
+if faq_file:
+    df = pd.read_excel(faq_file)
+
+    # Show/Hide FAQ Data Toggle
+    if st.button("👀 View FAQ Data"):
+        st.session_state.show_faq = not st.session_state.show_faq
+
+    if st.session_state.show_faq:
+        st.write("### FAQ Data Loaded:")
+        st.dataframe(df)
+
+    # Prepare FAQ context string
+    faq_context = "\n".join([
+        f"[{row['SL']}] {row['Area']} - Q: {row['Question']} | A: {row['Answer']}"
+        for _, row in df.iterrows()
+    ])
+else:
+    st.warning("Please upload an FAQ Excel file to start.")
+    st.stop()
+
+# Chat Interface
+# -----------------------------
+st.subheader("💬 Chat")
+
+# 👋 Show greeting only before first user query (not in chat history)
+if len(st.session_state.chat_history) == 0:
+    st.info("Hello! 👋 I’m **Priya**, your helpful AI assistant from Narayan Seva Sansthan (NSS). Ask me anything about NSS from the FAQ!")
+
+
+# Show chat history ABOVE the input box (latest near input)
+for i, chat in enumerate(st.session_state.chat_history):
+    with st.container():
+        st.markdown(f"**You:** {chat['user']}")
+        st.markdown(f"**Bot:** {chat['assistant']}")
+        st.caption(f"Tokens used: {chat['tokens']}")
+
+    # Feedback only if not already given
+    if i not in st.session_state.ratings:
+        col1, col2 = st.columns([0.15, 0.85])
+        with col1:
+            if st.button("👍", key=f"up_{i}"):
+                st.session_state.ratings[i] = "👍"
+                st.success("Feedback recorded: 👍")
+        with col2:
+            if st.button("👎", key=f"down_{i}"):
+                st.session_state.ratings[i] = "👎"
+                st.error("Feedback recorded: 👎")
+    else:
+        st.caption(f"✅ Feedback: {st.session_state.ratings[i]}")
+
+st.markdown("---")
+
+# Query input with SEND button on left side
+col_input = st.columns([0.8, 0.2])
+with col_input[0]:
+    default_value = st.session_state.pop("user_query", "")
+    user_query = st.text_input("Ask something:", value=default_value, key="user_query")
+with col_input[1]:
+    send_btn = st.button("Send")
+
+# Query Handling with Translation
+# -----------------------------
+if send_btn and user_query.strip():
+    # Detect query language
+    user_lang = detect_language(user_query)
+    query_for_faq = user_query
+
+    # If not English, translate to English
+    if user_lang != "en":
+        query_for_faq = translate_text(user_query, "en")
+
+    # Build full context in English
+    full_context = f"""
+System Prompt: {system_prompt}
+
+Conversation History:
+{st.session_state.chat_history[-5:]}
+
+FAQ Data (English only):
+{faq_context}
+
+User Query (translated to English if needed): {query_for_faq}
+    """
+
+    try:
+        response = model.generate_content(full_context)
+        bot_answer_en = response.text if response.text else "Sorry, I couldn't find an answer."
+
+        # Detect query language
+        user_lang = detect_language(user_query)
+        st.write(f"DEBUG: Detected user language = {user_lang}")
+
+        # Back-translation step
+        if user_lang != "en":
+            bot_answer = translate_text(bot_answer_en, target_lang=user_lang)
+        else:
+            bot_answer = bot_answer_en
+
+        # Tokens
+        tokens_used = len(user_query.split()) + len(bot_answer_en.split())
+        if hasattr(response, "usage_metadata"):
+            tokens_used = response.usage_metadata.total_token_count
+        st.session_state.token_usage += tokens_used
+
+        # Save in history
+        st.session_state.chat_history.append(
+            {"user": user_query, "assistant": bot_answer, "tokens": tokens_used}
+        )
+
+        st.session_state.pop("user_query", None)
+        st.rerun()
+
+    except Exception as e:
+        st.error(f"Error: {str(e)}")

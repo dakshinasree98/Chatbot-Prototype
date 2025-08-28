@@ -2,3 +2,5 @@ streamlit
 pandas
 openpyxl
 google-generativeai
+deep-translator
+googletrans

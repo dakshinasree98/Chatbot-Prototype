@@ -3,6 +3,8 @@ import pandas as pd
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
+from googletrans import Translator
+
 load_dotenv()
 # -----------------------------
 # App Config
@@ -12,10 +14,28 @@ st.set_page_config(page_title="FAQ Chatbot Prototype", layout="wide")
 # Load API key (set in environment variable before running)
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
-model = genai.GenerativeModel("gemini-1.5-flash")
+model = genai.GenerativeModel("gemini-2.5-flash")
+
+# Translator init
+translator = Translator()
+
+# Utility functions
 # -----------------------------
+def detect_language(text):
+    try:
+        lang = translator.detect(text).lang
+        return lang
+    except:
+        return "en"  # fallback
+
+def translate_text(text, target_lang="en"):
+    try:
+        return translator.translate(text, dest=target_lang).text
+    except:
+        return text
+
+
 # Session State Initialization
-# -----------------------------
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
@@ -41,13 +61,16 @@ with st.sidebar:
         "System Prompt",
         value="""
 You are Priya, a helpful AI assistant working at Narayan Seva Sansthan (NSS). You answer questions based on provided FAQ context, uploaded documents, and chat history. 
-You should:
+Rules:
 - Introduce yourself as Priya from NSS when greeting new users
+- FAQ data is in English
+- Always process queries in English (translate if needed)
+- Respond back in the same language as the user query
 - Provide accurate answers based on the given context
 - Reference uploaded documents when relevant
 - Maintain conversation continuity
 - Be concise but comprehensive
-- Use a friendly and professional tone""",
+- Maintain continuity, use a friendly and professional tone""",
         height=200
     )
 
@@ -129,86 +152,52 @@ with col_input[0]:
 with col_input[1]:
     send_btn = st.button("Send")
 
-# Query Handling
-# ------------------------
-if send_btn and user_query.strip() != "":
-    # Prepare prompt
-    context = f"System Prompt: {system_prompt}\n\n"
-    context += f"Here is the FAQ data:\n{faq_context}\n\n"
-    context += f"User Query: {user_query}\nAnswer only from FAQ."
+# Query Handling with Translation
+# -----------------------------
+if send_btn and user_query.strip():
+    # Detect query language
+    user_lang = detect_language(user_query)
+    query_for_faq = user_query
+
+    # If not English, translate to English
+    if user_lang != "en":
+        query_for_faq = translate_text(user_query, "en")
+
+    # Build full context in English
+    full_context = f"""
+System Prompt: {system_prompt}
+
+Conversation History:
+{st.session_state.chat_history[-5:]}
+
+FAQ Data (English only):
+{faq_context}
+
+User Query (translated to English if needed): {query_for_faq}
+    """
 
     try:
-        response = model.generate_content(context)
-        bot_answer = response.text if response.text else "Sorry, I couldn't find an answer."
+        response = model.generate_content(full_context)
+        bot_answer_en = response.text if response.text else "Sorry, I couldn't find an answer."
 
-        # # Capture tokens
-        tokens_used = len(user_query.split()) + len(bot_answer.split())
+        # Translate back to user language if needed
+        bot_answer = bot_answer_en
+        if user_lang != "en":
+            bot_answer = translate_text(bot_answer_en, user_lang)
+
+        # Tokens
+        tokens_used = len(user_query.split()) + len(bot_answer_en.split())
         if hasattr(response, "usage_metadata"):
             tokens_used = response.usage_metadata.total_token_count
-            st.session_state.token_usage += tokens_used
+        st.session_state.token_usage += tokens_used
 
         # Save in history
         st.session_state.chat_history.append(
             {"user": user_query, "assistant": bot_answer, "tokens": tokens_used}
         )
 
-        
+        st.session_state.pop("user_query", None)
+        st.rerun()
+
     except Exception as e:
         st.error(f"Error: {str(e)}")
-
-if send_btn and user_query:
-    # Conversation history (last 5 turns)
-    # Prepare conversation history (last few turns)
-    history_context = [
-        {"role": "user", "parts": h['user']} for h in st.session_state.chat_history[-5:]
-    ] + [
-        {"role": "model", "parts": h['assistant']} for h in st.session_state.chat_history[-5:]
-    ]
-
-    # Build messages for Gemini
-    messages = [
-    {"role": "user", "parts": f"""
-    You are Priya, an AI assistant for hotel-related queries.
-    Always be helpful and concise.
-
-    Conversation History:
-    {history_context}
-
-    FAQ Data:
-    {faq_context}
-
-    User Query: {user_query}
-    """}
-    ]
-
-    # Generate response
-    response = model.generate_content(messages)
-    answer = response.text
-
-
-    # Final input to model
-    full_context = f"""
-System Prompt: {system_prompt}
-
-Conversation History:
-{history_context}
-
-FAQ Data:
-{faq_context}
-
-User Query: {user_query}
-    """
-    st.session_state.pop("user_query", None)
-    st.rerun()
-
-
-    # Call Gemini Flash
-    response = model.generate_content(full_context)
-    answer = response.text
-
-    # Update history
-    st.session_state.chat_history.append({"user": user_query, "assistant": answer})
-
-    # Update token usage (approximate)
-    st.session_state.token_usage += len(user_query.split()) + len(answer.split())
-
