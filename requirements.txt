@@ -5,3 +5,4 @@ google-generativeai
 deep-translator
 googletrans
 python-dotenv
+supabase

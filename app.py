@@ -4,11 +4,11 @@ import google.generativeai as genai
 import os
 from dotenv import load_dotenv
 from deep_translator import GoogleTranslator
+from supabase import create_client
 
 load_dotenv()
-# -----------------------------
+
 # App Config
-# -----------------------------
 st.set_page_config(page_title="FAQ Chatbot Prototype", layout="wide")
 
 # Load API key (set in environment variable before running)
@@ -16,7 +16,9 @@ genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-
+url = os.getenv("SUPABASE_URL")
+key = os.getenv("SUPABASE_KEY")
+supabase = create_client(url, key)
 
 # Utility functions
 def detect_language(text):
@@ -46,9 +48,9 @@ if "token_usage" not in st.session_state:
 if "show_faq" not in st.session_state:
     st.session_state.show_faq = False
 
-# -----------------------------
+
 # Sidebar Controls
-# -----------------------------
+
 st.header("📘 FAQ Chatbot Prototype")
 st.sidebar.header("⚙️ Controls")
 faq_context = ""
@@ -85,7 +87,6 @@ if st.sidebar.button("🔄 Reset Session"):
 
 
 # File Upload
-# -----------------------------
 
 faq_file = st.file_uploader("Upload FAQ Excel", type=["xlsx"])
 
@@ -111,12 +112,24 @@ else:
     st.stop()
 
 # Chat Interface
-# -----------------------------
 st.subheader("💬 Chat")
 
 # 👋 Show greeting only before first user query (not in chat history)
 if len(st.session_state.chat_history) == 0:
     st.info("Hello! 👋 I’m **Priya**, your helpful AI assistant from Narayan Seva Sansthan (NSS). Ask me anything about NSS from the FAQ!")
+
+
+def save_feedback_supabase(query, answer, feedback):
+    """Save feedback into Supabase table"""
+    if not supabase:
+        print("Supabase client not initialized.")
+        return
+    response = supabase.table("feedback").insert({
+        "user_query": query,
+        "bot_answer": answer,
+        "feedback": feedback,
+    }).execute()
+    return response
 
 
 # Show chat history ABOVE the input box (latest near input)
@@ -132,13 +145,16 @@ for i, chat in enumerate(st.session_state.chat_history):
         with col1:
             if st.button("👍", key=f"up_{i}"):
                 st.session_state.ratings[i] = "👍"
+                save_feedback_supabase(chat["user"], chat["assistant"], "👍")
                 st.success("Feedback recorded: 👍")
         with col2:
             if st.button("👎", key=f"down_{i}"):
                 st.session_state.ratings[i] = "👎"
+                save_feedback_supabase(chat["user"], chat["assistant"], "👎")
                 st.error("Feedback recorded: 👎")
     else:
         st.caption(f"✅ Feedback: {st.session_state.ratings[i]}")
+
 
 st.markdown("---")
 
@@ -151,7 +167,6 @@ with col_input[1]:
     send_btn = st.button("Send")
 
 # Query Handling with Translation
-# -----------------------------
 if send_btn and user_query.strip():
     # Detect query language
     user_lang = detect_language(user_query)
@@ -204,3 +219,9 @@ User Query (translated to English if needed): {query_for_faq}
 
     except Exception as e:
         st.error(f"Error: {str(e)}")
+
+
+
+
+
+
